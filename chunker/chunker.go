@@ -54,6 +54,7 @@ type Chunker struct {
 	cfg     Config
 	byExt   map[string]LanguageConfig
 	kindMap map[string]kindSets // language name -> pre-computed kind lookup sets
+	edgeMap map[string]edgeSets // language name -> pre-computed edge rule lookup sets
 }
 
 // NewChunker constructs a Chunker from the provided language configs and size
@@ -86,6 +87,7 @@ func NewChunker(langs []LanguageConfig, cfg Config) (*Chunker, error) {
 	// Pre-compute O(1) kind lookup sets for each language, also covering
 	// injection grammars so that injected languages get the same benefit.
 	km := make(map[string]kindSets, len(langs))
+	em := make(map[string]edgeSets, len(langs))
 	var buildKindSets func(lang LanguageConfig)
 	buildKindSets = func(lang LanguageConfig) {
 		if _, ok := km[lang.Name]; ok {
@@ -100,6 +102,7 @@ func NewChunker(langs []LanguageConfig, cfg Config) (*Chunker, error) {
 			n[k] = struct{}{}
 		}
 		km[lang.Name] = kindSets{topLevel: tl, nested: n}
+		em[lang.Name] = buildEdgeSets(lang.Edges)
 		for _, inj := range lang.Injections {
 			for _, injLang := range inj.Grammars {
 				buildKindSets(injLang)
@@ -110,7 +113,7 @@ func NewChunker(langs []LanguageConfig, cfg Config) (*Chunker, error) {
 		buildKindSets(lang)
 	}
 
-	return &Chunker{cfg: cfg, byExt: byExt, kindMap: km}, nil
+	return &Chunker{cfg: cfg, byExt: byExt, kindMap: km, edgeMap: em}, nil
 }
 
 // atom is an internal unit collected during the recursive split phase.
@@ -151,13 +154,35 @@ func (c *Chunker) hasTopLevelAncestor(node *sitter.Node, topLevel map[string]str
 // extension, and [ErrParseFailed] when tree-sitter cannot parse the source.
 // Empty src returns nil, nil.
 func (c *Chunker) ChunkFile(filePath string, src []byte) ([]Chunk, error) {
+	res, err := c.analyze(filePath, src, false)
+	if err != nil {
+		return nil, err
+	}
+	return res.Chunks, nil
+}
+
+// Analyze parses src once and returns both its chunks and the graph edges
+// (calls, imports, supertypes, type references) found in it. Edges are nil when
+// the language declares no [EdgeRules].
+//
+// Analyze reuses the single parse that chunking already performs, so it costs
+// only the extra AST walk. Error behaviour matches [ChunkFile]; empty src
+// returns a zero Analysis.
+//
+// Edge targets are unresolved by design — see [Edge].
+func (c *Chunker) Analyze(filePath string, src []byte) (Analysis, error) {
+	return c.analyze(filePath, src, true)
+}
+
+// analyze is the shared implementation behind ChunkFile and Analyze.
+func (c *Chunker) analyze(filePath string, src []byte, wantEdges bool) (Analysis, error) {
 	if len(src) == 0 {
-		return nil, nil
+		return Analysis{}, nil
 	}
 	ext := strings.ToLower(filepath.Ext(filePath))
 	langCfg, ok := c.byExt[ext]
 	if !ok {
-		return nil, ErrUnsupportedLanguage
+		return Analysis{}, ErrUnsupportedLanguage
 	}
 
 	// Parser is created per call rather than pooled. sync.Pool evicts on GC,
@@ -166,25 +191,36 @@ func (c *Chunker) ChunkFile(filePath string, src []byte) ([]Chunk, error) {
 	defer parser.Close()
 
 	if err := parser.SetLanguage(langCfg.Grammar); err != nil {
-		return nil, fmt.Errorf("%w: setting language: %v", ErrParseFailed, err)
+		return Analysis{}, fmt.Errorf("%w: setting language: %v", ErrParseFailed, err)
 	}
 
 	tree := parser.Parse(src, nil)
 	if tree == nil {
-		return nil, ErrParseFailed
+		return Analysis{}, ErrParseFailed
 	}
 	defer tree.Close()
 
 	root := tree.RootNode()
 	atoms := make([]atom, 0, max(len(src)/c.cfg.MinChunkSize, 8))
-	// langCfg is a stack-local copy; &langCfg is valid only within this call since atoms never outlive ChunkFile.
+	// langCfg is a stack-local copy; &langCfg is valid only within this call since atoms never outlive analyze.
 	c.collectAtoms(root, src, &langCfg, filePath, &atoms)
 
-	if len(langCfg.Injections) > 0 {
-		atoms = c.applyInjections(atoms, root, src, &langCfg, filePath)
+	// Edges are collected while the tree is alive; Edge holds only resolved
+	// strings, so the result stays valid after the tree is closed.
+	var edges []Edge
+	if wantEdges {
+		c.collectEdges(root, src, &langCfg, filePath, &edges)
 	}
 
-	return c.mergeAtoms(atoms), nil
+	if len(langCfg.Injections) > 0 {
+		var injEdges *[]Edge
+		if wantEdges {
+			injEdges = &edges
+		}
+		atoms = c.applyInjections(atoms, root, src, &langCfg, filePath, injEdges)
+	}
+
+	return Analysis{Chunks: c.mergeAtoms(atoms), Edges: dedupeEdges(edges)}, nil
 }
 
 // collectAtoms recursively collects semantic atoms from the AST using the cAST algorithm.
@@ -401,19 +437,19 @@ func (c *Chunker) extractParentName(node *sitter.Node, src []byte, langCfg *Lang
 // applyInjections runs each configured InjectionRule as a post-pass over atoms,
 // replacing section-level atoms with semantically richer atoms produced by
 // re-parsing the embedded content with a secondary grammar.
-func (c *Chunker) applyInjections(atoms []atom, root *sitter.Node, src []byte, langCfg *LanguageConfig, filePath string) []atom {
+func (c *Chunker) applyInjections(atoms []atom, root *sitter.Node, src []byte, langCfg *LanguageConfig, filePath string, edges *[]Edge) []atom {
 	for _, rule := range langCfg.Injections {
-		atoms = c.applyInjection(atoms, root, src, rule, filePath)
+		atoms = c.applyInjection(atoms, root, src, rule, filePath, edges)
 	}
 	return atoms
 }
 
 // applyInjection applies a single InjectionRule to all matching container nodes in the AST.
-func (c *Chunker) applyInjection(atoms []atom, root *sitter.Node, src []byte, rule InjectionRule, filePath string) []atom {
+func (c *Chunker) applyInjection(atoms []atom, root *sitter.Node, src []byte, rule InjectionRule, filePath string, edges *[]Edge) []atom {
 	var containers []*sitter.Node
 	collectNodesByKind(root, rule.ContainerKind, &containers)
 	for _, container := range containers {
-		atoms = c.injectContainer(atoms, container, src, rule, filePath)
+		atoms = c.injectContainer(atoms, container, src, rule, filePath, edges)
 	}
 	return atoms
 }
@@ -421,7 +457,7 @@ func (c *Chunker) applyInjection(atoms []atom, root *sitter.Node, src []byte, ru
 // injectContainer re-parses the embedded content of one container node with a secondary grammar,
 // replacing its atoms with semantically richer atoms. Returns atoms unchanged on any error or
 // when the content is empty — injection is best-effort and degrades to section-level atoms.
-func (c *Chunker) injectContainer(atoms []atom, container *sitter.Node, src []byte, rule InjectionRule, filePath string) []atom {
+func (c *Chunker) injectContainer(atoms []atom, container *sitter.Node, src []byte, rule InjectionRule, filePath string, edges *[]Edge) []atom {
 	rawText := findChildByKind(container, rule.ContentKind)
 	if rawText == nil || rawText.StartByte() == rawText.EndByte() {
 		return atoms
@@ -462,6 +498,11 @@ func (c *Chunker) injectContainer(atoms []atom, container *sitter.Node, src []by
 
 	var injAtoms []atom
 	c.collectAtoms(injTree.RootNode(), src, &injCfg, filePath, &injAtoms)
+	// Edges from the injected grammar are collected even when the injected
+	// parse yields no atoms of its own.
+	if edges != nil {
+		c.collectEdges(injTree.RootNode(), src, &injCfg, filePath, edges)
+	}
 	if len(injAtoms) == 0 {
 		return atoms
 	}

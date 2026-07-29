@@ -29,4 +29,5 @@ type LanguageConfig struct {
 	Grammar    *sitter.Language // tree-sitter grammar; obtain via sitter.NewLanguage(binding.Language())
 	NodeKinds  NodeKindSet
 	Injections []InjectionRule // optional: re-parse embedded content with secondary grammars; nil means no injection
+	Edges      EdgeRules       // optional: graph edge extraction for Analyze; zero value disables it
 }

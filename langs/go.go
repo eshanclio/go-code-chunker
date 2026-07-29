@@ -22,6 +22,21 @@ var goLanguage = sync.OnceValue(func() chunker.LanguageConfig {
 			Nested:    []string{"field_declaration"},
 			NameField: "name",
 		},
+		Edges: chunker.EdgeRules{
+			Rules: []chunker.EdgeRule{
+				{Kind: "call_expression", Edge: chunker.EdgeCall, TargetField: "function"},
+				{Kind: "import_spec", Edge: chunker.EdgeImport},
+				// Go has no inheritance; struct and interface embedding is the
+				// equivalent relationship. An embedded field_declaration has a
+				// type but no field_identifier name.
+				{Kind: "type_identifier", Edge: chunker.EdgeReference},
+			},
+			Qualified: map[string]chunker.QualifiedFields{
+				"selector_expression": {Qualifier: "operand", Name: "field"},
+			},
+			ImportModuleKinds: []string{"interpreted_string_literal"},
+			ImportAliasKinds:  []string{"package_identifier"},
+		},
 	}
 })
 

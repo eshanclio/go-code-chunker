@@ -23,6 +23,22 @@ var pythonLanguage = sync.OnceValue(func() chunker.LanguageConfig {
 			Nested:    []string{"function_definition"},
 			NameField: "name",
 		},
+		Edges: chunker.EdgeRules{
+			Rules: []chunker.EdgeRule{
+				{Kind: "call", Edge: chunker.EdgeCall, TargetField: "function"},
+				{Kind: "import_statement", Edge: chunker.EdgeImport},
+				{Kind: "import_from_statement", Edge: chunker.EdgeImport},
+				// Scoped to the superclasses field: the argument_list kind is
+				// otherwise shared with call arguments.
+				{Kind: "class_definition", Edge: chunker.EdgeInherit, TargetField: "superclasses", Descend: true},
+			},
+			Qualified: map[string]chunker.QualifiedFields{
+				"attribute": {Qualifier: "object", Name: "attribute"},
+			},
+			NameKinds:         []string{"identifier"},
+			ImportModuleKinds: []string{"dotted_name", "relative_import"},
+			ImportAliasKinds:  []string{"identifier"},
+		},
 	}
 })
 

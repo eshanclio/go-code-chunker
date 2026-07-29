@@ -19,6 +19,7 @@ var javaScriptLanguage = sync.OnceValue(func() chunker.LanguageConfig {
 			Nested:    []string{"method_definition"},
 			NameField: "name",
 		},
+		Edges: ecmaEdgeRules(false),
 	}
 })
 

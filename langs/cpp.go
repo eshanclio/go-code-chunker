@@ -23,6 +23,20 @@ var cppLanguage = sync.OnceValue(func() chunker.LanguageConfig {
 			Nested:    []string{"function_definition"},
 			NameField: "name",
 		},
+		Edges: chunker.EdgeRules{
+			Rules: []chunker.EdgeRule{
+				{Kind: "call_expression", Edge: chunker.EdgeCall, TargetField: "function"},
+				{Kind: "preproc_include", Edge: chunker.EdgeImport},
+				{Kind: "base_class_clause", Edge: chunker.EdgeInherit, Descend: true},
+				{Kind: "type_identifier", Edge: chunker.EdgeReference},
+			},
+			Qualified: map[string]chunker.QualifiedFields{
+				"field_expression":     {Qualifier: "argument", Name: "field"},
+				"qualified_identifier": {Qualifier: "scope", Name: "name"},
+			},
+			NameKinds:         []string{"type_identifier", "qualified_identifier"},
+			ImportModuleKinds: []string{"system_lib_string", "string_content"},
+		},
 	}
 })
 
