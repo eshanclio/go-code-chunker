@@ -19,6 +19,7 @@ var typeScriptLanguage = sync.OnceValue(func() chunker.LanguageConfig {
 			Nested:    []string{"method_definition", "method_signature"},
 			NameField: "name",
 		},
+		Edges: ecmaEdgeRules(true),
 	}
 })
 

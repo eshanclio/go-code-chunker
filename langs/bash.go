@@ -19,6 +19,18 @@ var bashLanguage = sync.OnceValue(func() chunker.LanguageConfig {
 			Nested:    []string{},
 			NameField: "name",
 		},
+		Edges: chunker.EdgeRules{
+			Rules: []chunker.EdgeRule{
+				// Every command is a potential call to a function defined
+				// elsewhere in the script or sourced from another file.
+				{Kind: "command", Edge: chunker.EdgeCall, TargetField: "name"},
+			},
+			ImportModuleKinds: []string{"word"},
+			CallNameEdges: map[string]chunker.EdgeKind{
+				"source": chunker.EdgeImport,
+				".":      chunker.EdgeImport,
+			},
+		},
 	}
 })
 

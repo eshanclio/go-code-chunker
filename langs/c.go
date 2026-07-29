@@ -19,6 +19,16 @@ var cLanguage = sync.OnceValue(func() chunker.LanguageConfig {
 			Nested:    []string{},
 			NameField: "",
 		},
+		Edges: chunker.EdgeRules{
+			Rules: []chunker.EdgeRule{
+				{Kind: "call_expression", Edge: chunker.EdgeCall, TargetField: "function"},
+				{Kind: "preproc_include", Edge: chunker.EdgeImport},
+				{Kind: "type_identifier", Edge: chunker.EdgeReference},
+			},
+			// Both <stdio.h> and "local.h" forms; cleanModulePath strips the
+			// surrounding brackets and quotes.
+			ImportModuleKinds: []string{"system_lib_string", "string_content"},
+		},
 	}
 })
 
